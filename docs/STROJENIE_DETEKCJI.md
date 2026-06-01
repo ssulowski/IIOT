@@ -22,6 +22,7 @@ recording:
   max_event_seconds: 60
   raw_fourcc: MJPG
   raw_quality: 95
+  writer_queue_frames: 64
 
 detection:
   process_width: 320
@@ -45,10 +46,10 @@ detection:
   merge_distance: 28
 
 compression:
-  crf: 12
+  crf: 24
   scale_width: 960
   sharpen: true
-  delete_raw_after_compress: false
+  delete_raw_after_compress: true
 ```
 
 Co jest najwazniejsze:
@@ -59,6 +60,8 @@ Co jest najwazniejsze:
 - `max_global_motion_ratio`, `max_candidates_per_frame` i `max_candidate_area_ratio` odrzucaja ruch duzych chmur.
 - `min_track_speed` odrzuca wolno przesuwajace sie fragmenty chmur.
 - `960x720` daje troche wiecej szczegolow niz 640x480, ale `8 FPS` chroni Raspberry Pi Zero 2 W przed zbyt ciezkim zapisem.
+- `crf: 24` daje mniejsze pliki MP4. Skoro znikanie ptaka bylo widoczne tez w AVI, nie ma sensu trzymac bardzo wysokiego bitrate.
+- `delete_raw_after_compress: true` usuwa surowy AVI po kompresji, zeby nie zapychac karty SD.
 
 Jezeli nadal lapie chmury, zaostrz:
 

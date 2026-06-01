@@ -16,11 +16,13 @@ import json
 import logging
 import math
 import os
+import queue
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 import shutil
 import subprocess
+import threading
 import time
 from typing import Any, Deque, Iterable
 from uuid import uuid4
@@ -58,6 +60,7 @@ class RecordingConfig:
     min_event_seconds: int = 3
     raw_fourcc: str = "MJPG"
     raw_quality: int = 95
+    writer_queue_frames: int = 64
 
 
 @dataclasses.dataclass
@@ -67,36 +70,37 @@ class DetectionConfig:
     background_var_threshold: int = 45
     learning_rate: float = -1
     min_area: int = 4
-    max_area: int = 180
-    max_global_motion_ratio: float = 0.006
-    max_candidates_per_frame: int = 2
-    max_candidate_area_ratio: float = 0.0025
-    max_bbox_area: int = 260
-    max_aspect_ratio: float = 3.5
+    max_area: int = 260
+    max_global_motion_ratio: float = 0.008
+    max_candidates_per_frame: int = 3
+    max_candidate_area_ratio: float = 0.0035
+    max_bbox_area: int = 420
+    max_aspect_ratio: float = 4.5
     min_fill_ratio: float = 0.12
     max_fill_ratio: float = 0.95
-    min_contrast: float = 14
-    min_dark_contrast: float = 18
-    max_foreground_brightness: float = 115
+    min_contrast: float = 10
+    min_dark_contrast: float = 12
+    max_foreground_brightness: float = 140
     min_surround_brightness: float = 80
-    max_surround_stddev: float = 42
-    min_track_hits: int = 4
+    max_surround_stddev: float = 55
+    min_track_hits: int = 3
     track_ttl_frames: int = 8
-    min_track_distance: float = 8
-    min_track_speed: float = 1.7
-    merge_distance: float = 28
+    min_track_distance: float = 6
+    min_track_speed: float = 1.2
+    merge_distance: float = 34
     debug_preview: bool = False
+    log_rejections_every_frames: int = 120
 
 
 @dataclasses.dataclass
 class CompressionConfig:
     enabled: bool = True
     ffmpeg_path: str = "ffmpeg"
-    crf: int = 12
+    crf: int = 24
     preset: str = "veryfast"
     scale_width: int = 960
     sharpen: bool = True
-    delete_raw_after_compress: bool = False
+    delete_raw_after_compress: bool = True
 
 
 @dataclasses.dataclass
@@ -275,12 +279,14 @@ class MotionDetector:
         moving_ratio = float(cv2.countNonZero(fg)) / float(fg.size)
         if moving_ratio > self.cfg.max_global_motion_ratio:
             self._age_tracks()
-            return False, {
+            metadata = {
                 "reason": "global_motion",
                 "moving_ratio": moving_ratio,
                 "candidates": 0,
                 "valid_tracks": 0,
             }
+            self._log_rejection(metadata)
+            return False, metadata
 
         candidates = self._extract_candidates(gray, fg)
         candidate_area_ratio = sum(candidate.area for candidate in candidates) / float(fg.size)
@@ -289,13 +295,15 @@ class MotionDetector:
             or candidate_area_ratio > self.cfg.max_candidate_area_ratio
         ):
             self._age_tracks()
-            return False, {
+            metadata = {
                 "reason": "cloud_like_motion",
                 "moving_ratio": moving_ratio,
                 "candidates": len(candidates),
                 "candidate_area_ratio": round(candidate_area_ratio, 5),
                 "valid_tracks": 0,
             }
+            self._log_rejection(metadata)
+            return False, metadata
 
         self._update_tracks(candidates)
         valid_tracks = [
@@ -322,7 +330,17 @@ class MotionDetector:
                 for track in valid_tracks[:5]
             ],
         }
+        if not valid_tracks:
+            metadata["reason"] = "no_valid_track"
         return bool(valid_tracks), metadata
+
+    def _log_rejection(self, metadata: dict[str, Any]) -> None:
+        if self.cfg.log_rejections_every_frames <= 0:
+            return
+        if metadata.get("reason") == "no_valid_track":
+            return
+        if self.frame_index % self.cfg.log_rejections_every_frames == 0:
+            LOGGER.info("Detector rejected: %s", metadata)
 
     def _extract_candidates(self, gray: np.ndarray, mask: np.ndarray) -> list[Candidate]:
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -435,6 +453,68 @@ class MotionDetector:
         ]
 
 
+class AsyncVideoWriter:
+    def __init__(
+        self,
+        path: Path,
+        fourcc: int,
+        fps: float,
+        frame_size: tuple[int, int],
+        quality: int,
+        max_queue_frames: int,
+    ) -> None:
+        self.path = path
+        self.writer = cv2.VideoWriter(str(path), fourcc, fps, frame_size)
+        if not self.writer.isOpened():
+            self.writer.release()
+            raise RuntimeError(f"Cannot open video writer for {path}")
+        self.writer.set(cv2.VIDEOWRITER_PROP_QUALITY, float(quality))
+
+        self.frames: queue.Queue[np.ndarray | None] = queue.Queue(maxsize=max_queue_frames)
+        self.dropped_frames = 0
+        self.written_frames = 0
+        self._closed = False
+        self._error: BaseException | None = None
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"video-writer-{path.stem}",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def write(self, frame: np.ndarray) -> bool:
+        if self._closed:
+            return False
+        try:
+            self.frames.put_nowait(frame.copy())
+            return True
+        except queue.Full:
+            self.dropped_frames += 1
+            return False
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self.frames.put(None)
+        self._thread.join()
+        if self._error is not None:
+            raise RuntimeError(f"Video writer failed for {self.path}") from self._error
+
+    def _run(self) -> None:
+        try:
+            while True:
+                frame = self.frames.get()
+                if frame is None:
+                    break
+                self.writer.write(frame)
+                self.written_frames += 1
+        except BaseException as exc:
+            self._error = exc
+        finally:
+            self.writer.release()
+
+
 class Recorder:
     def __init__(
         self,
@@ -449,7 +529,7 @@ class Recorder:
             maxlen=max(1, int(cfg.camera.fps * cfg.recording.pre_seconds))
         )
         self.pre_buffer.append(first_frame.copy())
-        self.writer: cv2.VideoWriter | None = None
+        self.writer: AsyncVideoWriter | None = None
         self.raw_path: Path | None = None
         self.final_path: Path | None = None
         self.metadata_path: Path | None = None
@@ -460,6 +540,7 @@ class Recorder:
         self.current_recording_fps = float(cfg.camera.fps)
         self.frames_written = 0
         self.pre_frames_written = 0
+        self.writer_dropped_frames = 0
 
         cfg.paths.recordings_dir.mkdir(parents=True, exist_ok=True)
         cfg.paths.unsent_dir.mkdir(parents=True, exist_ok=True)
@@ -484,8 +565,8 @@ class Recorder:
                 self._start(detector_info, now)
 
         if self.is_recording and self.writer is not None:
-            self.writer.write(frame)
-            self.frames_written += 1
+            if self.writer.write(frame):
+                self.frames_written += 1
             duration = now - self.event_started_at
             silence = now - self.last_detection_at
             should_stop = (
@@ -510,27 +591,22 @@ class Recorder:
 
         fourcc_text = self.cfg.recording.raw_fourcc[:4].ljust(4)
         fourcc = cv2.VideoWriter_fourcc(*fourcc_text)
-        self.writer = cv2.VideoWriter(
-            str(self.raw_path),
-            fourcc,
-            float(self.current_recording_fps),
-            self.frame_size,
-        )
-        if not self.writer.isOpened():
-            self.writer.release()
-            self.writer = None
-            raise RuntimeError(f"Cannot open video writer for {self.raw_path}")
-        self.writer.set(
-            cv2.VIDEOWRITER_PROP_QUALITY,
-            float(self.cfg.recording.raw_quality),
+        self.writer = AsyncVideoWriter(
+            path=self.raw_path,
+            fourcc=fourcc,
+            fps=float(self.current_recording_fps),
+            frame_size=self.frame_size,
+            quality=self.cfg.recording.raw_quality,
+            max_queue_frames=self.cfg.recording.writer_queue_frames,
         )
 
         self.frames_written = 0
         self.pre_frames_written = 0
+        self.writer_dropped_frames = 0
         for buffered_frame in list(self.pre_buffer):
-            self.writer.write(buffered_frame)
-            self.frames_written += 1
-            self.pre_frames_written += 1
+            if self.writer.write(buffered_frame):
+                self.frames_written += 1
+                self.pre_frames_written += 1
 
         self.event_started_at = now
         self.last_detection_at = now
@@ -550,7 +626,9 @@ class Recorder:
         assert self.final_path is not None
         assert self.metadata_path is not None
 
-        self.writer.release()
+        writer = self.writer
+        writer.close()
+        self.writer_dropped_frames = writer.dropped_frames
         self.writer = None
         duration = time.monotonic() - self.event_started_at
         pre_buffer_duration = self.pre_frames_written / max(0.001, self.current_recording_fps)
@@ -561,6 +639,8 @@ class Recorder:
         metadata["expected_video_duration_seconds"] = round(expected_video_duration, 2)
         metadata["frames_written"] = self.frames_written
         metadata["pre_frames_written"] = self.pre_frames_written
+        metadata["writer_dropped_frames"] = self.writer_dropped_frames
+        metadata["writer_actual_written_frames"] = writer.written_frames
         metadata["effective_video_fps"] = round(
             self.frames_written / max(0.001, expected_video_duration),
             2,
@@ -585,6 +665,7 @@ class Recorder:
         self.event_metadata = {}
         self.frames_written = 0
         self.pre_frames_written = 0
+        self.writer_dropped_frames = 0
 
 
 def process_completed_event(
