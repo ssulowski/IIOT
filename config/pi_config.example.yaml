@@ -1,0 +1,52 @@
+camera:
+  backend: auto          # auto, picamera2 albo opencv
+  device_index: 0
+  width: 640
+  height: 480
+  fps: 12
+  warmup_seconds: 2
+
+paths:
+  recordings_dir: recordings
+  unsent_dir: recordings/unsent
+
+recording:
+  pre_seconds: 4
+  post_seconds: 5
+  max_event_seconds: 60
+  min_event_seconds: 3
+  raw_fourcc: MJPG
+
+detection:
+  process_width: 320
+  background_history: 220
+  background_var_threshold: 28
+  learning_rate: -1
+  min_area: 5
+  max_area: 450
+  max_global_motion_ratio: 0.055
+  min_fill_ratio: 0.12
+  max_fill_ratio: 0.92
+  min_contrast: 10
+  min_track_hits: 3
+  track_ttl_frames: 8
+  min_track_distance: 5
+  merge_distance: 28
+  debug_preview: false
+
+compression:
+  enabled: true
+  ffmpeg_path: ffmpeg
+  crf: 28
+  preset: veryfast
+  scale_width: 640
+  delete_raw_after_compress: true
+
+upload:
+  enabled: true
+  server_url: "https://example.trycloudflare.com"
+  api_key: "change-me"
+  timeout_seconds: 45
+  retry_count: 4
+  retry_backoff_seconds: 8
+

@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+data/
+recordings/
+*.log
+*.tmp
+*.avi
+*.mp4
+config/pi_config.yaml
