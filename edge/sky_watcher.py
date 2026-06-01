@@ -38,9 +38,9 @@ LOGGER = logging.getLogger("sky_watcher")
 class CameraConfig:
     backend: str = "auto"
     device_index: int = 0
-    width: int = 640
-    height: int = 480
-    fps: int = 10
+    width: int = 960
+    height: int = 720
+    fps: int = 8
     warmup_seconds: float = 2.0
 
 
@@ -63,25 +63,28 @@ class RecordingConfig:
 @dataclasses.dataclass
 class DetectionConfig:
     process_width: int = 320
-    background_history: int = 420
-    background_var_threshold: int = 38
+    background_history: int = 500
+    background_var_threshold: int = 45
     learning_rate: float = -1
     min_area: int = 4
-    max_area: int = 420
-    max_global_motion_ratio: float = 0.014
-    max_candidates_per_frame: int = 5
-    max_candidate_area_ratio: float = 0.008
-    max_bbox_area: int = 900
-    max_aspect_ratio: float = 5.0
+    max_area: int = 180
+    max_global_motion_ratio: float = 0.006
+    max_candidates_per_frame: int = 2
+    max_candidate_area_ratio: float = 0.0025
+    max_bbox_area: int = 260
+    max_aspect_ratio: float = 3.5
     min_fill_ratio: float = 0.12
     max_fill_ratio: float = 0.95
-    min_contrast: float = 10
-    min_dark_contrast: float = 12
-    min_track_hits: int = 3
+    min_contrast: float = 14
+    min_dark_contrast: float = 18
+    max_foreground_brightness: float = 115
+    min_surround_brightness: float = 80
+    max_surround_stddev: float = 42
+    min_track_hits: int = 4
     track_ttl_frames: int = 8
-    min_track_distance: float = 7
-    min_track_speed: float = 1.5
-    merge_distance: float = 32
+    min_track_distance: float = 8
+    min_track_speed: float = 1.7
+    merge_distance: float = 28
     debug_preview: bool = False
 
 
@@ -91,7 +94,7 @@ class CompressionConfig:
     ffmpeg_path: str = "ffmpeg"
     crf: int = 12
     preset: str = "veryfast"
-    scale_width: int = 640
+    scale_width: int = 960
     sharpen: bool = True
     delete_raw_after_compress: bool = False
 
@@ -212,6 +215,9 @@ class Candidate:
     contrast: float
     dark_contrast: float
     aspect_ratio: float
+    foreground_mean: float
+    surround_mean: float
+    surround_stddev: float
 
 
 @dataclasses.dataclass
@@ -353,11 +359,18 @@ class MotionDetector:
             surround = gray[y1:y2, x1:x2]
             foreground_mean = float(np.mean(foreground))
             surround_mean = float(np.mean(surround))
+            surround_stddev = float(np.std(surround))
             dark_contrast = surround_mean - foreground_mean
             contrast = abs(dark_contrast)
             if contrast < self.cfg.min_contrast:
                 continue
             if dark_contrast < self.cfg.min_dark_contrast:
+                continue
+            if foreground_mean > self.cfg.max_foreground_brightness:
+                continue
+            if surround_mean < self.cfg.min_surround_brightness:
+                continue
+            if surround_stddev > self.cfg.max_surround_stddev:
                 continue
 
             moments = cv2.moments(contour)
@@ -372,6 +385,9 @@ class MotionDetector:
                     contrast=contrast,
                     dark_contrast=dark_contrast,
                     aspect_ratio=aspect_ratio,
+                    foreground_mean=foreground_mean,
+                    surround_mean=surround_mean,
+                    surround_stddev=surround_stddev,
                 )
             )
 

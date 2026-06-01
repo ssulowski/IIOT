@@ -1,8 +1,8 @@
 # Strojenie detekcji
 
-Profil domyslny jest teraz dobrany pod male ptaki podobne do nagrania testowego oraz troche wieksze obiekty, np. samoloty na dalszym planie.
+Aktualny profil jest mocno anty-chmurowy i dobrany pod ciemne sylwetki: male ptaki, dalekie samoloty i drony widoczne jako czarny punkt na jasniejszym tle.
 
-Gotowy profil jest w:
+Gotowy profil:
 
 ```text
 config/pi_config.birds_airplanes.yaml
@@ -12,75 +12,76 @@ Najwazniejsze ustawienia:
 
 ```yaml
 camera:
-  fps: 10
+  width: 960
+  height: 720
+  fps: 8
 
 recording:
   pre_seconds: 4
   post_seconds: 15
   max_event_seconds: 60
+  raw_fourcc: MJPG
+  raw_quality: 95
 
 detection:
   process_width: 320
-  background_history: 420
-  background_var_threshold: 38
+  background_history: 500
+  background_var_threshold: 45
   min_area: 4
-  max_area: 420
-  max_global_motion_ratio: 0.010
-  max_candidates_per_frame: 3
-  max_candidate_area_ratio: 0.004
-  max_bbox_area: 900
-  max_aspect_ratio: 5.0
-  min_fill_ratio: 0.12
-  max_fill_ratio: 0.95
-  min_contrast: 10
-  min_dark_contrast: 12
-  min_track_hits: 3
-  track_ttl_frames: 8
-  min_track_distance: 7
-  min_track_speed: 1.5
-  merge_distance: 32
+  max_area: 180
+  max_global_motion_ratio: 0.006
+  max_candidates_per_frame: 2
+  max_candidate_area_ratio: 0.0025
+  max_bbox_area: 260
+  max_aspect_ratio: 3.5
+  min_contrast: 14
+  min_dark_contrast: 18
+  max_foreground_brightness: 115
+  min_surround_brightness: 80
+  max_surround_stddev: 42
+  min_track_hits: 4
+  min_track_distance: 8
+  min_track_speed: 1.7
+  merge_distance: 28
 
 compression:
   crf: 12
+  scale_width: 960
   sharpen: true
   delete_raw_after_compress: false
 ```
 
-Co to robi:
+Co jest najwazniejsze:
 
-- `min_area: 4` lapie bardzo male ptaki, ktore na przeskalowanej klatce maja tylko kilka pikseli.
-- `max_area: 420` zostawia zapas na wiekszego ptaka, drona albo daleki samolot.
-- `min_dark_contrast: 12` wymaga, zeby obiekt byl ciemniejszy od otoczenia. To mocno ogranicza falszywe detekcje jasnych krawedzi chmur.
-- `min_track_hits: 3` wystarcza na szybkie ptaki widoczne tylko przez kilka klatek.
-- `min_track_speed: 1.5` odrzuca wolno przesuwajace sie fragmenty chmur.
-- `merge_distance: 32` pozwala sledzic szybki obiekt, ktory robi wiekszy skok miedzy klatkami.
-- `max_global_motion_ratio`, `max_candidates_per_frame` i `max_candidate_area_ratio` odrzucaja ruch chmur.
-- `fps: 10` jest celowo konserwatywne dla Raspberry Pi Zero 2 W. Przy 15 FPS Pi moze nie nadazac z zapisem i film wyglada wtedy jak przyspieszony.
-- `post_seconds: 15` nagrywa dlugo po ostatniej detekcji, zeby ptak mial czas doleciec do brzegu kadru nawet jesli detektor szybko go zgubi.
-- `crf: 12` daje bardzo wysoka jakosc MP4, zeby mala czarna kropka nie znikala przez kompresje.
-- `delete_raw_after_compress: false` zostawia surowy AVI na RPi do diagnostyki. Gdy wszystko juz dziala, mozna zmienic na `true`.
+- `min_dark_contrast` wymaga, zeby obiekt byl ciemniejszy od otoczenia. To odcina jasne krawedzie chmur.
+- `max_foreground_brightness` odrzuca kandydaty, ktore sa zbyt jasne jak na ptaka/samolot jako sylwetke.
+- `max_surround_stddev` odrzuca mocno teksturalne fragmenty chmur. Ptak na gladkim niebie ma zwykle spokojniejsze otoczenie.
+- `max_global_motion_ratio`, `max_candidates_per_frame` i `max_candidate_area_ratio` odrzucaja ruch duzych chmur.
+- `min_track_speed` odrzuca wolno przesuwajace sie fragmenty chmur.
+- `960x720` daje troche wiecej szczegolow niz 640x480, ale `8 FPS` chroni Raspberry Pi Zero 2 W przed zbyt ciezkim zapisem.
 
-Jezeli nadal lapie chmury, zaostrz po kolei:
+Jezeli nadal lapie chmury, zaostrz:
 
 ```yaml
-max_global_motion_ratio: 0.010
-max_candidates_per_frame: 2
-max_candidate_area_ratio: 0.0025
-background_var_threshold: 45
-min_track_hits: 4
-min_contrast: 14
-min_dark_contrast: 16
-min_track_speed: 2.0
+max_global_motion_ratio: 0.004
+max_candidates_per_frame: 1
+max_candidate_area_ratio: 0.0015
+min_dark_contrast: 24
+max_foreground_brightness: 90
+max_surround_stddev: 30
+min_track_hits: 5
+min_track_speed: 2.2
 ```
 
-Jezeli przestanie lapac male ptaki, luzuj po kolei:
+Jezeli przestaje lapac ptaki, luzuj pojedynczo:
 
 ```yaml
-min_area: 3
-min_contrast: 8
-min_dark_contrast: 8
-min_track_distance: 4
-max_candidates_per_frame: 7
+min_dark_contrast: 12
+max_foreground_brightness: 140
+max_surround_stddev: 55
+min_track_hits: 3
+max_area: 260
+max_bbox_area: 420
 ```
 
-Jezeli film wyglada jak przyspieszony, zaktualizuj `edge/sky_watcher.py` na RPi. Nowsza wersja zapisuje liczbe klatek i rozciaga MP4 do realnego czasu zdarzenia podczas kompresji.
+Jezeli ptak znika w AVI, to nie jest problem uploadu ani MP4. Oznacza to, ze kamera zapisuje go tylko przez kilka klatek: obiekt ma za malo pikseli, traci kontrast albo zlewa sie z tlem. Wtedy najbardziej pomaga skierowanie kamery tak, zeby niebo zajmowalo wiecej kadru, zoom/optyka o wezszym kacie albo wyzsza rozdzielczosc przy nizszym FPS.
