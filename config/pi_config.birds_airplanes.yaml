@@ -1,5 +1,5 @@
 camera:
-  backend: auto          # auto, picamera2 albo opencv
+  backend: auto
   device_index: 0
   width: 640
   height: 480

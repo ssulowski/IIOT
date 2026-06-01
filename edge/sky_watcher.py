@@ -40,7 +40,7 @@ class CameraConfig:
     device_index: int = 0
     width: int = 640
     height: int = 480
-    fps: int = 12
+    fps: int = 10
     warmup_seconds: float = 2.0
 
 
@@ -53,28 +53,35 @@ class PathsConfig:
 @dataclasses.dataclass
 class RecordingConfig:
     pre_seconds: int = 4
-    post_seconds: int = 5
+    post_seconds: int = 15
     max_event_seconds: int = 60
     min_event_seconds: int = 3
     raw_fourcc: str = "MJPG"
+    raw_quality: int = 95
 
 
 @dataclasses.dataclass
 class DetectionConfig:
     process_width: int = 320
-    background_history: int = 220
-    background_var_threshold: int = 28
+    background_history: int = 420
+    background_var_threshold: int = 38
     learning_rate: float = -1
-    min_area: int = 5
-    max_area: int = 450
-    max_global_motion_ratio: float = 0.055
+    min_area: int = 4
+    max_area: int = 420
+    max_global_motion_ratio: float = 0.014
+    max_candidates_per_frame: int = 5
+    max_candidate_area_ratio: float = 0.008
+    max_bbox_area: int = 900
+    max_aspect_ratio: float = 5.0
     min_fill_ratio: float = 0.12
-    max_fill_ratio: float = 0.92
+    max_fill_ratio: float = 0.95
     min_contrast: float = 10
+    min_dark_contrast: float = 12
     min_track_hits: int = 3
     track_ttl_frames: int = 8
-    min_track_distance: float = 5
-    merge_distance: float = 28
+    min_track_distance: float = 7
+    min_track_speed: float = 1.5
+    merge_distance: float = 32
     debug_preview: bool = False
 
 
@@ -82,10 +89,11 @@ class DetectionConfig:
 class CompressionConfig:
     enabled: bool = True
     ffmpeg_path: str = "ffmpeg"
-    crf: int = 28
+    crf: int = 12
     preset: str = "veryfast"
     scale_width: int = 640
-    delete_raw_after_compress: bool = True
+    sharpen: bool = True
+    delete_raw_after_compress: bool = False
 
 
 @dataclasses.dataclass
@@ -202,6 +210,8 @@ class Candidate:
     bbox: tuple[int, int, int, int]
     area: float
     contrast: float
+    dark_contrast: float
+    aspect_ratio: float
 
 
 @dataclasses.dataclass
@@ -209,17 +219,25 @@ class Track:
     track_id: int
     first: tuple[float, float]
     last: tuple[float, float]
+    first_frame: int
+    last_frame: int
     hits: int = 1
     missed: int = 0
 
-    def update(self, centroid: tuple[float, float]) -> None:
+    def update(self, centroid: tuple[float, float], frame_index: int) -> None:
         self.last = centroid
+        self.last_frame = frame_index
         self.hits += 1
         self.missed = 0
 
     @property
     def distance(self) -> float:
         return math.dist(self.first, self.last)
+
+    @property
+    def average_speed(self) -> float:
+        frames = max(1, self.last_frame - self.first_frame)
+        return self.distance / frames
 
 
 class MotionDetector:
@@ -259,23 +277,40 @@ class MotionDetector:
             }
 
         candidates = self._extract_candidates(gray, fg)
+        candidate_area_ratio = sum(candidate.area for candidate in candidates) / float(fg.size)
+        if (
+            len(candidates) > self.cfg.max_candidates_per_frame
+            or candidate_area_ratio > self.cfg.max_candidate_area_ratio
+        ):
+            self._age_tracks()
+            return False, {
+                "reason": "cloud_like_motion",
+                "moving_ratio": moving_ratio,
+                "candidates": len(candidates),
+                "candidate_area_ratio": round(candidate_area_ratio, 5),
+                "valid_tracks": 0,
+            }
+
         self._update_tracks(candidates)
         valid_tracks = [
             track
             for track in self.tracks
             if track.hits >= self.cfg.min_track_hits
             and track.distance >= self.cfg.min_track_distance
+            and track.average_speed >= self.cfg.min_track_speed
         ]
 
         metadata = {
             "moving_ratio": moving_ratio,
             "candidates": len(candidates),
+            "candidate_area_ratio": round(candidate_area_ratio, 5),
             "valid_tracks": len(valid_tracks),
             "tracks": [
                 {
                     "id": track.track_id,
                     "hits": track.hits,
                     "distance_px_processed": round(track.distance, 2),
+                    "speed_px_per_frame_processed": round(track.average_speed, 2),
                     "last": [round(track.last[0], 1), round(track.last[1], 1)],
                 }
                 for track in valid_tracks[:5]
@@ -293,6 +328,13 @@ class MotionDetector:
 
             x, y, w, h = cv2.boundingRect(contour)
             rect_area = max(1, w * h)
+            if rect_area > self.cfg.max_bbox_area:
+                continue
+
+            aspect_ratio = max(w, h) / max(1, min(w, h))
+            if aspect_ratio > self.cfg.max_aspect_ratio:
+                continue
+
             fill_ratio = area / rect_area
             if fill_ratio < self.cfg.min_fill_ratio or fill_ratio > self.cfg.max_fill_ratio:
                 continue
@@ -309,15 +351,29 @@ class MotionDetector:
             x1 = max(0, x - pad)
             x2 = min(gray.shape[1], x + w + pad)
             surround = gray[y1:y2, x1:x2]
-            contrast = abs(float(np.mean(foreground)) - float(np.mean(surround)))
+            foreground_mean = float(np.mean(foreground))
+            surround_mean = float(np.mean(surround))
+            dark_contrast = surround_mean - foreground_mean
+            contrast = abs(dark_contrast)
             if contrast < self.cfg.min_contrast:
+                continue
+            if dark_contrast < self.cfg.min_dark_contrast:
                 continue
 
             moments = cv2.moments(contour)
             if moments["m00"] == 0:
                 continue
             centroid = (moments["m10"] / moments["m00"], moments["m01"] / moments["m00"])
-            candidates.append(Candidate(centroid, (x, y, w, h), area, contrast))
+            candidates.append(
+                Candidate(
+                    centroid=centroid,
+                    bbox=(x, y, w, h),
+                    area=area,
+                    contrast=contrast,
+                    dark_contrast=dark_contrast,
+                    aspect_ratio=aspect_ratio,
+                )
+            )
 
         return candidates
 
@@ -340,11 +396,13 @@ class MotionDetector:
                         track_id=self.next_track_id,
                         first=candidate.centroid,
                         last=candidate.centroid,
+                        first_frame=self.frame_index,
+                        last_frame=self.frame_index,
                     )
                 )
                 self.next_track_id += 1
             else:
-                self.tracks[match_idx].update(candidate.centroid)
+                self.tracks[match_idx].update(candidate.centroid, self.frame_index)
                 unmatched_tracks.discard(match_idx)
 
         for idx in unmatched_tracks:
@@ -383,6 +441,9 @@ class Recorder:
         self.last_detection_at = 0.0
         self.event_id = ""
         self.event_metadata: dict[str, Any] = {}
+        self.current_recording_fps = float(cfg.camera.fps)
+        self.frames_written = 0
+        self.pre_frames_written = 0
 
         cfg.paths.recordings_dir.mkdir(parents=True, exist_ok=True)
         cfg.paths.unsent_dir.mkdir(parents=True, exist_ok=True)
@@ -391,8 +452,15 @@ class Recorder:
     def is_recording(self) -> bool:
         return self.writer is not None
 
-    def add_frame(self, frame: np.ndarray, detected: bool, detector_info: dict[str, Any]) -> None:
+    def add_frame(
+        self,
+        frame: np.ndarray,
+        detected: bool,
+        detector_info: dict[str, Any],
+        observed_fps: float,
+    ) -> None:
         now = time.monotonic()
+        self.current_recording_fps = observed_fps
 
         if detected:
             self.last_detection_at = now
@@ -401,6 +469,7 @@ class Recorder:
 
         if self.is_recording and self.writer is not None:
             self.writer.write(frame)
+            self.frames_written += 1
             duration = now - self.event_started_at
             silence = now - self.last_detection_at
             should_stop = (
@@ -428,16 +497,24 @@ class Recorder:
         self.writer = cv2.VideoWriter(
             str(self.raw_path),
             fourcc,
-            float(self.cfg.camera.fps),
+            float(self.current_recording_fps),
             self.frame_size,
         )
         if not self.writer.isOpened():
             self.writer.release()
             self.writer = None
             raise RuntimeError(f"Cannot open video writer for {self.raw_path}")
+        self.writer.set(
+            cv2.VIDEOWRITER_PROP_QUALITY,
+            float(self.cfg.recording.raw_quality),
+        )
 
+        self.frames_written = 0
+        self.pre_frames_written = 0
         for buffered_frame in list(self.pre_buffer):
             self.writer.write(buffered_frame)
+            self.frames_written += 1
+            self.pre_frames_written += 1
 
         self.event_started_at = now
         self.last_detection_at = now
@@ -445,6 +522,7 @@ class Recorder:
             "event_id": self.event_id,
             "started_at_utc": datetime.now(timezone.utc).isoformat(),
             "pre_buffer_seconds": self.cfg.recording.pre_seconds,
+            "recording_fps": round(self.current_recording_fps, 2),
             "camera": dataclasses.asdict(self.cfg.camera),
             "first_detection": detector_info,
         }
@@ -459,8 +537,18 @@ class Recorder:
         self.writer.release()
         self.writer = None
         duration = time.monotonic() - self.event_started_at
+        pre_buffer_duration = self.pre_frames_written / max(0.001, self.current_recording_fps)
+        expected_video_duration = pre_buffer_duration + duration
         metadata = dict(self.event_metadata)
         metadata["duration_seconds"] = round(duration, 2)
+        metadata["pre_buffer_actual_seconds"] = round(pre_buffer_duration, 2)
+        metadata["expected_video_duration_seconds"] = round(expected_video_duration, 2)
+        metadata["frames_written"] = self.frames_written
+        metadata["pre_frames_written"] = self.pre_frames_written
+        metadata["effective_video_fps"] = round(
+            self.frames_written / max(0.001, expected_video_duration),
+            2,
+        )
         metadata["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
 
         LOGGER.info("Finished event %s, queued for compression/upload", self.event_id)
@@ -479,6 +567,8 @@ class Recorder:
         self.metadata_path = None
         self.event_id = ""
         self.event_metadata = {}
+        self.frames_written = 0
+        self.pre_frames_written = 0
 
 
 def process_completed_event(
@@ -491,7 +581,7 @@ def process_completed_event(
 ) -> None:
     try:
         if compression.enabled:
-            compress_video(raw_path, final_path, compression)
+            compress_video(raw_path, final_path, compression, metadata)
             if compression.delete_raw_after_compress:
                 raw_path.unlink(missing_ok=True)
         else:
@@ -509,9 +599,15 @@ def process_completed_event(
         LOGGER.exception("Failed to process event %s", raw_path)
 
 
-def compress_video(raw_path: Path, final_path: Path, cfg: CompressionConfig) -> None:
+def compress_video(
+    raw_path: Path,
+    final_path: Path,
+    cfg: CompressionConfig,
+    metadata: dict[str, Any],
+) -> None:
     final_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = final_path.with_suffix(".tmp.mp4")
+    video_filter = build_video_filter(cfg, metadata)
     cmd = [
         cfg.ffmpeg_path,
         "-y",
@@ -521,7 +617,7 @@ def compress_video(raw_path: Path, final_path: Path, cfg: CompressionConfig) -> 
         "-i",
         str(raw_path),
         "-vf",
-        f"scale={cfg.scale_width}:-2",
+        video_filter,
         "-c:v",
         "libx264",
         "-preset",
@@ -535,6 +631,25 @@ def compress_video(raw_path: Path, final_path: Path, cfg: CompressionConfig) -> 
     LOGGER.info("Compressing %s", raw_path.name)
     subprocess.run(cmd, check=True)
     tmp_path.replace(final_path)
+
+
+def build_video_filter(cfg: CompressionConfig, metadata: dict[str, Any]) -> str:
+    filters: list[str] = []
+    frames_written = int(metadata.get("frames_written") or 0)
+    encoded_fps = float(metadata.get("recording_fps") or 0)
+    expected_duration = float(metadata.get("expected_video_duration_seconds") or 0)
+    if frames_written > 0 and encoded_fps > 0 and expected_duration > 0:
+        encoded_duration = frames_written / encoded_fps
+        if encoded_duration > 0:
+            correction = expected_duration / encoded_duration
+            metadata["playback_correction_factor"] = round(correction, 4)
+            if abs(correction - 1.0) > 0.05:
+                filters.append(f"setpts={correction:.6f}*PTS")
+
+    filters.append(f"scale={cfg.scale_width}:-2")
+    if cfg.sharpen:
+        filters.append("unsharp=5:5:0.8:3:3:0.4")
+    return ",".join(filters)
 
 
 def sha256_file(path: Path) -> str:
@@ -608,14 +723,26 @@ def run(config_path: Path) -> None:
             first_frame = camera.read()
             detector = MotionDetector(cfg.detection, first_frame.shape)
             recorder = Recorder(cfg, first_frame, executor)
+            frame_times: Deque[float] = deque(maxlen=max(10, cfg.camera.fps * 5))
 
             LOGGER.info("Sky watcher started")
             next_frame_at = time.monotonic()
             frame_delay = 1.0 / max(1, cfg.camera.fps)
             while True:
                 frame = camera.read()
+                captured_at = time.monotonic()
+                frame_times.append(captured_at)
+                observed_fps = float(cfg.camera.fps)
+                if len(frame_times) >= 2:
+                    elapsed = frame_times[-1] - frame_times[0]
+                    if elapsed > 0:
+                        observed_fps = max(
+                            1.0,
+                            min(float(cfg.camera.fps), (len(frame_times) - 1) / elapsed),
+                        )
+
                 detected, info = detector.detect(frame)
-                recorder.add_frame(frame, detected, info)
+                recorder.add_frame(frame, detected, info, observed_fps)
 
                 if cfg.detection.debug_preview:
                     preview = frame.copy()

@@ -30,6 +30,9 @@ W `config/pi_config.yaml` ustaw:
 - `upload.api_key`, taki sam jak na serwerze,
 - parametry kamery i detekcji, jeśli trzeba je dostroić.
 
+Profil pod małe ptaki i dalekie samoloty jest w `config/pi_config.birds_airplanes.yaml`.
+Jeżeli kamera nagrywa ciągle przy ruchu chmur, użyj wskazówek z `docs/STROJENIE_DETEKCJI.md`.
+
 Start ręczny:
 
 ```bash

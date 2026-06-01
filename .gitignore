@@ -9,3 +9,4 @@ recordings/
 *.avi
 *.mp4
 config/pi_config.yaml
+diagnostic_frames/
