@@ -1,10 +1,14 @@
 camera:
   backend: auto
   device_index: 0
-  width: 960
-  height: 720
+  width: 640
+  height: 480
   fps: 8
   warmup_seconds: 2
+  ae_enable: true
+  exposure_time_us: 0
+  analogue_gain: 0.0
+  awb_enable: true
 
 paths:
   recordings_dir: recordings
@@ -20,29 +24,29 @@ recording:
   writer_queue_frames: 64
 
 detection:
-  process_width: 320
+  process_width: 480
   background_history: 500
   background_var_threshold: 45
   learning_rate: -1
-  min_area: 4
-  max_area: 260
-  max_global_motion_ratio: 0.008
-  max_candidates_per_frame: 3
-  max_candidate_area_ratio: 0.0035
+  min_area: 2
+  max_area: 320
+  max_global_motion_ratio: 0.010
+  max_candidates_per_frame: 4
+  max_candidate_area_ratio: 0.0045
   max_bbox_area: 420
   max_aspect_ratio: 4.5
-  min_fill_ratio: 0.12
+  min_fill_ratio: 0.08
   max_fill_ratio: 0.95
-  min_contrast: 10
-  min_dark_contrast: 12
+  min_contrast: 8
+  min_dark_contrast: 8
   max_foreground_brightness: 140
-  min_surround_brightness: 80
-  max_surround_stddev: 55
-  min_track_hits: 3
-  track_ttl_frames: 8
-  min_track_distance: 6
-  min_track_speed: 1.2
-  merge_distance: 34
+  min_surround_brightness: 60
+  max_surround_stddev: 65
+  min_track_hits: 2
+  track_ttl_frames: 10
+  min_track_distance: 3
+  min_track_speed: 0.8
+  merge_distance: 44
   debug_preview: false
   log_rejections_every_frames: 120
 
@@ -51,7 +55,7 @@ compression:
   ffmpeg_path: ffmpeg
   crf: 24
   preset: veryfast
-  scale_width: 960
+  scale_width: 640
   sharpen: true
   delete_raw_after_compress: true
 

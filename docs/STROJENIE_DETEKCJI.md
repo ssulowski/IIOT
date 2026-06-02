@@ -12,9 +12,13 @@ Najwazniejsze ustawienia:
 
 ```yaml
 camera:
-  width: 960
-  height: 720
+  width: 640
+  height: 480
   fps: 8
+  ae_enable: true
+  exposure_time_us: 0
+  analogue_gain: 0.0
+  awb_enable: true
 
 recording:
   pre_seconds: 4
@@ -25,7 +29,7 @@ recording:
   writer_queue_frames: 64
 
 detection:
-  process_width: 320
+  process_width: 480
   background_history: 500
   background_var_threshold: 45
   min_area: 4
@@ -47,7 +51,7 @@ detection:
 
 compression:
   crf: 24
-  scale_width: 960
+  scale_width: 640
   sharpen: true
   delete_raw_after_compress: true
 ```
@@ -59,9 +63,20 @@ Co jest najwazniejsze:
 - `max_surround_stddev` odrzuca mocno teksturalne fragmenty chmur. Ptak na gladkim niebie ma zwykle spokojniejsze otoczenie.
 - `max_global_motion_ratio`, `max_candidates_per_frame` i `max_candidate_area_ratio` odrzucaja ruch duzych chmur.
 - `min_track_speed` odrzuca wolno przesuwajace sie fragmenty chmur.
-- `960x720` daje troche wiecej szczegolow niz 640x480, ale `8 FPS` chroni Raspberry Pi Zero 2 W przed zbyt ciezkim zapisem.
+- `640x480` jest stabilnym natywnym trybem OV5647. `process_width: 480` daje detektorowi wiecej szczegolow niz 320 bez podbijania zapisu wideo.
 - `crf: 24` daje mniejsze pliki MP4. Skoro znikanie ptaka bylo widoczne tez w AVI, nie ma sensu trzymac bardzo wysokiego bitrate.
 - `delete_raw_after_compress: true` usuwa surowy AVI po kompresji, zeby nie zapychac karty SD.
+- Domyslnie kamera uzywa autoekspozycji (`ae_enable: true`). Jezeli jasnosc kadru plywa przez chmury, testowo wlacz manual:
+
+```yaml
+camera:
+  ae_enable: false
+  exposure_time_us: 2500
+  analogue_gain: 1.0
+  awb_enable: true
+```
+
+W dzien przy jasnym niebie zwykle testuj `exposure_time_us` w zakresie `1000-5000`. Za ciemno: zwieksz exposure albo gain. Za jasno/przepalone chmury: zmniejsz exposure.
 
 Jezeli nadal lapie chmury, zaostrz:
 

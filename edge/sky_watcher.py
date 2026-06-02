@@ -40,10 +40,14 @@ LOGGER = logging.getLogger("sky_watcher")
 class CameraConfig:
     backend: str = "auto"
     device_index: int = 0
-    width: int = 960
-    height: int = 720
+    width: int = 640
+    height: int = 480
     fps: int = 8
     warmup_seconds: float = 2.0
+    ae_enable: bool = True
+    exposure_time_us: int = 0
+    analogue_gain: float = 0.0
+    awb_enable: bool = True
 
 
 @dataclasses.dataclass
@@ -65,29 +69,29 @@ class RecordingConfig:
 
 @dataclasses.dataclass
 class DetectionConfig:
-    process_width: int = 320
+    process_width: int = 480
     background_history: int = 500
     background_var_threshold: int = 45
     learning_rate: float = -1
-    min_area: int = 4
-    max_area: int = 260
-    max_global_motion_ratio: float = 0.008
-    max_candidates_per_frame: int = 3
-    max_candidate_area_ratio: float = 0.0035
+    min_area: int = 2
+    max_area: int = 320
+    max_global_motion_ratio: float = 0.010
+    max_candidates_per_frame: int = 4
+    max_candidate_area_ratio: float = 0.0045
     max_bbox_area: int = 420
     max_aspect_ratio: float = 4.5
-    min_fill_ratio: float = 0.12
+    min_fill_ratio: float = 0.08
     max_fill_ratio: float = 0.95
-    min_contrast: float = 10
-    min_dark_contrast: float = 12
+    min_contrast: float = 8
+    min_dark_contrast: float = 8
     max_foreground_brightness: float = 140
-    min_surround_brightness: float = 80
-    max_surround_stddev: float = 55
-    min_track_hits: int = 3
-    track_ttl_frames: int = 8
-    min_track_distance: float = 6
-    min_track_speed: float = 1.2
-    merge_distance: float = 34
+    min_surround_brightness: float = 60
+    max_surround_stddev: float = 65
+    min_track_hits: int = 2
+    track_ttl_frames: int = 10
+    min_track_distance: float = 3
+    min_track_speed: float = 0.8
+    merge_distance: float = 44
     debug_preview: bool = False
     log_rejections_every_frames: int = 120
 
@@ -98,7 +102,7 @@ class CompressionConfig:
     ffmpeg_path: str = "ffmpeg"
     crf: int = 24
     preset: str = "veryfast"
-    scale_width: int = 960
+    scale_width: int = 640
     sharpen: bool = True
     delete_raw_after_compress: bool = True
 
@@ -160,9 +164,19 @@ class PiCamera2Source(CameraSource):
         from picamera2 import Picamera2
 
         self.picam2 = Picamera2()
+        controls: dict[str, Any] = {"FrameRate": cfg.fps}
+        if not cfg.ae_enable:
+            controls["AeEnable"] = False
+            if cfg.exposure_time_us > 0:
+                controls["ExposureTime"] = cfg.exposure_time_us
+            if cfg.analogue_gain > 0:
+                controls["AnalogueGain"] = cfg.analogue_gain
+        if not cfg.awb_enable:
+            controls["AwbEnable"] = False
+
         config = self.picam2.create_video_configuration(
             main={"size": (cfg.width, cfg.height), "format": "RGB888"},
-            controls={"FrameRate": cfg.fps},
+            controls=controls,
         )
         self.picam2.configure(config)
         self.picam2.start()
